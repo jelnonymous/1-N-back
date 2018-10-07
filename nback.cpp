@@ -1,4 +1,4 @@
-
+// See LICENSE for license information 
 
 #include <cassert>
 #include <cerrno>
