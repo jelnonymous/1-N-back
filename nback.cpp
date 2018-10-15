@@ -1,4 +1,4 @@
-// See LICENSE for license information 
+
 
 #include <cassert>
 #include <cerrno>
@@ -19,6 +19,11 @@ private:
 				: m_source(source), m_inc(0) { }
 		public:
 			inline bool is_valid() const { return m_inc < m_source->count; }
+			inline void next() {
+				if (is_valid()) {
+					++m_inc;
+				}
+			}
 		protected:
 			const ring_t<t_type, size> *m_source;
 			int m_inc;
@@ -51,11 +56,7 @@ public:
 			inline const t_type &get() const {
 				return base::m_source->data[get_data_index()];
 			}
-			void next() {
-				if (base::is_valid()) {
-					++base::m_inc;
-				}
-			}
+			
 	};
 
 	c_const_iterator iterate() const {
@@ -78,11 +79,6 @@ public:
 			}
 			inline const t_type &get() const {
 				return base::m_source->data[get_data_index()];
-			}
-			void next() {
-				if (base::is_valid()) {
-					++base::m_inc;
-				}
 			}
 	};
 
@@ -178,6 +174,7 @@ struct optional {
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 
+//TODO: type-generic shuffle, at least other integral types
 void shuffle_ints(int *array, size_t n) {
 	if (n > 1) {
 		size_t i;
@@ -195,13 +192,14 @@ void shuffle_ints(int *array, size_t n) {
 
 typedef ring_t<int, 7> n_back_buffer;
 
-bool is_guess_correct(const n_back_buffer &past, int guess_back) {
+bool nback_is_guess_correct(const n_back_buffer &past, int guess_back) {
 	bool result= false;
 
 	if (guess_back < past.get_count()) {
 		int counter= 0;
 		int head_value= -1;
 
+	// $TODO: no loop needed, use index offset
 		for (n_back_buffer::c_const_reverse_iterator it= past.iterate_reverse();
 			guess_back >= counter && it.is_valid();
 			counter++, it.next()) {
@@ -217,7 +215,7 @@ bool is_guess_correct(const n_back_buffer &past, int guess_back) {
 	return result;
 }
 
-bool has_nback(const n_back_buffer &past) {
+bool nback_has_back(const n_back_buffer &past) {
 	bool result= false;
 
 	int counter= 0;
@@ -252,7 +250,7 @@ public:
 class generic_value_provider : public i_nback_value_provider {
 private:
 	enum {
-		max_impl_size= 1024
+		max_impl_size= 256
 	};
 public:
 
@@ -331,6 +329,7 @@ public:
 	}
 
 private:
+//TODO: store one value per byte, compress storage
 	int m_cards[card_count];
 	int m_index;
 };
@@ -428,14 +427,18 @@ bool try_get_guess_with_timeout(
 		}
 
 		select_result= select(1, &read_fds, NULL, NULL, &tv);
-		if (select_result == -1 && errno != EINTR) {
-			fprintf(stderr, "Error in select. todo: stringify\n");
+
+		if (select_result == -1) {
+			if (errno != EINTR) {
+				fprintf(stderr, "Error in select. todo: stringify\n");
+			} else {
+				//we've received an interrupt - handle this
+				fprintf(stderr, "todo: interrupt?\n");
+			}
 			exit(EXIT_FAILURE);
-		} else if (select_result == -1 && errno == EINTR) {
-			//we've received and interrupt - handle this
-			fprintf(stderr, "todo: interrupt?\n");
-			exit(EXIT_FAILURE);
-		} else if (select_result) {
+		} else if (select_result == 0) {
+			//no result
+		} else {
 			assert(FD_ISSET(STDIN_FILENO, &read_fds));
 
 			fgets(buff, sizeof(buff), stdin);
@@ -470,12 +473,13 @@ struct nback_options {
 };
 
 void display_usage() {
-	puts("N-Back brain improvement console application. by: Jelley   ");
+	puts("N-Back brain improvement. by: jelly   ");
 	puts("Options:                                                   ");
+	puts("  --cards          : default, shuffled deck of 40 cards  ");
 	puts("  --test           : test mode, short and predictable      ");
-	puts("  --random         : puts the game in 'true random' mode   ");
-	puts("  --hide_history   : disables history display on each guess");
-	puts("  --guess_clear    : clears history on each guess (resets) ");
+	puts("  --random         : 'true random' mode. never ends     ");
+	puts("  --no_history     : disables history display on each guess");
+	puts("  --guess_reset    : resets history on each guess        ");
 	puts("  --seconds [v]    : set timeout for each guess (from 2)   ");
 	puts("  --help, -h, -?   : display this message                  ");
 }
@@ -483,11 +487,13 @@ void display_usage() {
 bool get_options(int argc, char *argv[], nback_options &out_options) {
 	bool success= true;
 	int getopt_code;
-	const char *const opt_string= "s:h?";
+	const char *const opt_string= "s:nh?";
+	int unused;
 	const struct option long_options[]= {
+		{ "cards",        no_argument,    &unused, 1 },
 		{ "test",         no_argument, &out_options.test_mode, 1 },
 		{ "random",       no_argument, &out_options.random_mode, 1 },
-		{ "hide_history", no_argument, &out_options.print_buffer_on_guess, 0 },
+		{ "no_history",   no_argument, 0, 'n' },
 		{ "guess_clear",  no_argument, &out_options.clear_buffer_on_guess, 1 },
 		{ "seconds",      required_argument, 0, 's' },
 		{ "help",         no_argument, 0, 'h' },
@@ -497,7 +503,6 @@ bool get_options(int argc, char *argv[], nback_options &out_options) {
 	out_options.clear();
 
 	do {
-		// getopt_long stores the option index here
 		int option_index= 0;
 
 		getopt_code= getopt_long(argc, argv, opt_string, long_options, &option_index);
@@ -507,11 +512,11 @@ bool get_options(int argc, char *argv[], nback_options &out_options) {
 				break;
 
 			case 0:
-				// If this option set a flag, do nothing else now.
-				if (long_options[option_index].flag != 0) {
-					break;
-				}
-				//TODO: What is this case?
+				//TODO: What is this case? seems to relate to option_index being valid
+				break;
+				
+			case 'n':
+				out_options.print_buffer_on_guess= 0;
 				break;
 
 			case 's':
@@ -542,6 +547,7 @@ value_provider_factory factory;
 struct nback_results {
 	int correct;
 	int incorrect;
+	int incorrect_no_nback;
 	int misses;
 };
 
@@ -575,11 +581,20 @@ int main(int argc, char *argv[]) {
 		prov= factory.create<card_value_provider>();
 	}
 
-	puts("Ready yourself...");
+	puts("N-back is training for your brain.");
+	puts("Numbers are presented in sequence,");
+	puts("  and it's your job to identify");
+	puts("  how far (n) back that number");
+	printf("  last appeared, to a max of %d.\n",
+		n_back_buffer::my_size-1);
+	sleep(1);
+	
+	puts("Here we go!");
 	sleep(1);
 
 	while (prov->has_next()) {
-		int guess_back;
+		optional<int> guess_back;
+		int has_nback;
 		int current_value= prov->get_next_value();
 
 		if (past.is_full()) {
@@ -587,18 +602,26 @@ int main(int argc, char *argv[]) {
 		}
 
 		past.enqueue(current_value);
+		
+		has_nback= nback_has_back(past);
+		
+		guess_back.is_set= try_get_guess_with_timeout(current_value, options.timeout_sec, guess_back.value);
 
-		if (try_get_guess_with_timeout(current_value, options.timeout_sec, guess_back)) {
+		if (guess_back.is_set) {
 			if (options.print_buffer_on_guess) {
 				print_n_back_buffer(past);
 			}
 
-			if (is_guess_correct(past, guess_back)) {
+			if (nback_is_guess_correct(past, guess_back.value)) {
 				puts("correct! resuming...");
 				res.correct++;
 			} else {
 				puts("wrong! resuming...");
-				res.incorrect++;
+				if (has_nback) {
+					res.incorrect++;
+				} else {
+					res.incorrect_no_nback++;
+				}
 			}
 
 			if (options.clear_buffer_on_guess) {
@@ -607,16 +630,16 @@ int main(int argc, char *argv[]) {
 			sleep(2);
 		} else {
 			// todo: should misses count all nbacks, regardless of whether past is cleared?
-			res.misses+= has_nback(past) ? 1 : 0;
+			res.misses+= has_nback ? 1 : 0;
 		}
 	}
 
 	puts("... That's all!");
 	
 	printf("correct: %d\n", res.correct);
-	printf("incorrect: %d\n", res.incorrect);
+	printf("incorrect (w/ nback): %d\n", res.incorrect);
+	printf("incorrect (w/ no nback): %d\n", res.incorrect_no_nback);
 	printf("missed: %d\n", res.misses);
 
 	return 0;
 }
-
